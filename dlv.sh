@@ -1,0 +1,1 @@
+go build -gcflags "all=-N -l" -o vela-mitm-amd64 && dlv1.19 --listen=0.0.0.0:2345 --headless=true --api-version=2  exec ./vela-mitm-amd64 --
