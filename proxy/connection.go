@@ -114,6 +114,7 @@ func (connCtx *ConnContext) initHttpServerConn(r *http.Request) {
 	} else {
 		useProxy = http.ProxyFromEnvironment
 	}
+
 	serverConn := newServerConn()
 	serverConn.client = &http.Client{
 		Transport: &http.Transport{

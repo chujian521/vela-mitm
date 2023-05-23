@@ -1,18 +1,10 @@
 package web
 
 import (
-	"embed"
-	"io/fs"
-	"net/http"
-	"sync"
-
 	"github.com/gorilla/websocket"
-	log "github.com/sirupsen/logrus"
 	"github.com/vela-ssoc/vela-mitm/proxy"
+	"sync"
 )
-
-//go:embed client/build
-var assets embed.FS
 
 type WebAddon struct {
 	proxy.BaseAddon
@@ -20,57 +12,32 @@ type WebAddon struct {
 
 	conns   []*concurrentConn
 	connsMu sync.RWMutex
+
+	config Config
 }
 
-func NewWebAddon(addr string) *WebAddon {
+func NewWebAddon(cfg Config) *WebAddon {
 	web := new(WebAddon)
-	web.upgrader = &websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
-
-	serverMux := new(http.ServeMux)
-	serverMux.HandleFunc("/echo", web.echo)
-
-	fsys, err := fs.Sub(assets, "client/build")
-	if err != nil {
-		panic(err)
-	}
-	serverMux.Handle("/", http.FileServer(http.FS(fsys)))
-
-	server := &http.Server{Addr: addr, Handler: serverMux}
 	web.conns = make([]*concurrentConn, 0)
-
-	go func() {
-		log.Infof("web interface start listen at %v\n", addr)
-		err := server.ListenAndServe()
-		log.Error(err)
-	}()
-
+	web.config = cfg
+	web.ListenServer(cfg.Addr)
 	return web
 }
-
-func (web *WebAddon) echo(w http.ResponseWriter, r *http.Request) {
-	c, err := web.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Print("upgrade:", err)
-		return
+func (web *WebAddon) disconnect(name string) {
+	for _, conn := range web.conns {
+		if conn.userData.Name == name {
+			web.removeConn(conn)
+		}
 	}
-
-	conn := newConn(c)
-	web.addConn(conn)
-	defer func() {
-		web.removeConn(conn)
-		c.Close()
-	}()
-
-	conn.readloop()
 }
 
 func (web *WebAddon) addConn(c *concurrentConn) {
+
+	web.disconnect(c.userData.Name)
+
 	web.connsMu.Lock()
 	web.conns = append(web.conns, c)
+	c.OpenDB(web.config.Name)
 	web.connsMu.Unlock()
 }
 
@@ -82,6 +49,7 @@ func (web *WebAddon) removeConn(conn *concurrentConn) {
 	for i, c := range web.conns {
 		if conn == c {
 			index = i
+			c.db.close()
 			c.interceptorClear()
 			break
 		}
@@ -124,43 +92,33 @@ func (web *WebAddon) sendFlow(f *proxy.Flow, msgFn func() *messageFlow) bool {
 }
 
 func (web *WebAddon) Requestheaders(f *proxy.Flow) {
-	if f.ConnContext.ClientConn.Tls {
-		web.forEachConn(func(c *concurrentConn) {
-			c.trySendConnMessage(f)
-		})
-	}
-
 	web.sendFlow(f, func() *messageFlow {
 		return newMessageFlow(messageTypeRequest, f)
 	})
 }
 
 func (web *WebAddon) Request(f *proxy.Flow) {
+
 	web.sendFlow(f, func() *messageFlow {
 		return newMessageFlow(messageTypeRequestBody, f)
 	})
 }
 
 func (web *WebAddon) Responseheaders(f *proxy.Flow) {
-	if !f.ConnContext.ClientConn.Tls {
-		web.forEachConn(func(c *concurrentConn) {
-			c.trySendConnMessage(f)
-		})
-	}
-
 	web.sendFlow(f, func() *messageFlow {
 		return newMessageFlow(messageTypeResponse, f)
 	})
 }
 
 func (web *WebAddon) Response(f *proxy.Flow) {
+
 	web.sendFlow(f, func() *messageFlow {
 		return newMessageFlow(messageTypeResponseBody, f)
 	})
 }
 
 func (web *WebAddon) ServerDisconnected(connCtx *proxy.ConnContext) {
-	web.forEachConn(func(c *concurrentConn) {
-		c.whenConnClose(connCtx)
-	})
+	//web.forEachConn(func(c *concurrentConn) {
+	//	c.whenConnClose(connCtx)
+	//})
 }

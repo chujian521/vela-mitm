@@ -5,11 +5,13 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-
+	"fmt"
 	"github.com/bytedance/sonic"
 	uuid "github.com/satori/go.uuid"
 	log "github.com/sirupsen/logrus"
+	"github.com/vela-ssoc/vela-kit/auxlib"
 	"github.com/vela-ssoc/vela-mitm/proxy"
+	"net/url"
 )
 
 // message:
@@ -25,6 +27,14 @@ import (
 // type: 21
 // messageMeta
 // version 1 byte + type 1 byte + content left bytes
+
+var (
+	TooShortE     = fmt.Errorf("too short message")
+	VersionE      = fmt.Errorf("invalid message version")
+	InvalidTypeE  = fmt.Errorf("invalid message type")
+	InvalidFlowId = fmt.Errorf("invalid message flow id")
+	MessageE      = fmt.Errorf("invalid message format")
+)
 
 const messageVersion = 2
 
@@ -46,6 +56,15 @@ const (
 	messageTypeChangeBreakPointRules messageType = 21
 	messageTypeInterceptor           messageType = 22
 	messageTypeInterceptorOff        messageType = 23
+
+	messageTypeChangeRequestV2    messageType = 101
+	messageTypeChangeResponseV2   messageType = 102
+	MessageTypeChangeHistoryRules messageType = 103
+
+	messageTypePull  messageType = 105
+	messageTypeFlows messageType = 106
+
+	messageTypeLogin messageType = 110
 )
 
 var allMessageTypes = []messageType{
@@ -62,6 +81,11 @@ var allMessageTypes = []messageType{
 	messageTypeChangeBreakPointRules,
 	messageTypeInterceptor,
 	messageTypeInterceptorOff,
+	messageTypeChangeRequestV2,
+	messageTypeChangeResponseV2,
+	MessageTypeChangeHistoryRules,
+	messageTypePull,
+	messageTypeFlows,
 }
 
 func validMessageType(t byte) bool {
@@ -147,17 +171,17 @@ type messageEdit struct {
 	response *proxy.Response
 }
 
-func parseMessageEdit(data []byte) *messageEdit {
+func parseMessageEdit(data []byte) (*messageEdit, error) {
 	// 2 + 36
 	if len(data) < 38 {
-		return nil
+		return nil, TooShortE
 	}
 
 	mType := (messageType)(data[1])
 
 	id, err := uuid.FromString(string(data[2:38]))
 	if err != nil {
-		return nil
+		return nil, InvalidFlowId
 	}
 
 	msg := &messageEdit{
@@ -166,23 +190,23 @@ func parseMessageEdit(data []byte) *messageEdit {
 	}
 
 	if mType == messageTypeDropRequest || mType == messageTypeDropResponse {
-		return msg
+		return msg, nil
 	}
 
 	// 2 + 36 + 4 + 4
 	if len(data) < 46 {
-		return nil
+		return nil, TooShortE
 	}
 
 	hl := (int)(binary.BigEndian.Uint32(data[38:42]))
 	if 42+hl+4 > len(data) {
-		return nil
+		return nil, MessageE
 	}
 	headerContent := data[42 : 42+hl]
 
 	bl := (int)(binary.BigEndian.Uint32(data[42+hl : 42+hl+4]))
 	if 42+hl+4+bl != len(data) {
-		return nil
+		return nil, MessageE
 	}
 	bodyContent := data[42+hl+4:]
 
@@ -190,7 +214,7 @@ func parseMessageEdit(data []byte) *messageEdit {
 		req := new(proxy.Request)
 		err := json.Unmarshal(headerContent, req)
 		if err != nil {
-			return nil
+			return nil, MessageE
 		}
 		req.Body = bodyContent
 		msg.request = req
@@ -198,15 +222,15 @@ func parseMessageEdit(data []byte) *messageEdit {
 		res := new(proxy.Response)
 		err := json.Unmarshal(headerContent, res)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 		res.Body = bodyContent
 		msg.response = res
 	} else {
-		return nil
+		return nil, MessageE
 	}
 
-	return msg
+	return msg, nil
 }
 
 func (m *messageEdit) bytes() []byte {
@@ -249,31 +273,30 @@ func (m *messageEdit) bytes() []byte {
 }
 
 type messageMeta struct {
-	mType           messageType
-	breakPointRules []*breakPointRule
+	mType messageType
+	rule  *breakPointRule
 }
 
-func parseMessageMeta(data []byte) *messageMeta {
+func parseMessageMeta(data []byte) (*messageMeta, error) {
 	content := data[2:]
-	rules := make([]*breakPointRule, 0)
-	err := json.Unmarshal(content, &rules)
+
+	rule := &breakPointRule{}
+	err := json.Unmarshal(content, rule)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	msg := &messageMeta{
-		mType:           messageType(data[1]),
-		breakPointRules: rules,
+		mType: messageType(data[1]),
+		rule:  rule,
 	}
 
 	msg.parseRule()
-	return msg
+	return msg, nil
 }
 
 func (m *messageMeta) parseRule() {
-	for _, rule := range m.breakPointRules {
-		rule.parse()
-	}
+	m.rule.parse()
 }
 
 func (m *messageMeta) bytes() []byte {
@@ -281,7 +304,7 @@ func (m *messageMeta) bytes() []byte {
 	buf.WriteByte(byte(messageVersion))
 	buf.WriteByte(byte(m.mType))
 
-	content, err := json.Marshal(m.breakPointRules)
+	content, err := json.Marshal(m.rule)
 	if err != nil {
 		panic(err)
 	}
@@ -290,17 +313,107 @@ func (m *messageMeta) bytes() []byte {
 	return buf.Bytes()
 }
 
-func parseMessage(data []byte) message {
-	if len(data) < 2 {
+func NewMessage(data []byte) *messageEdit {
+	// 2 + 36
+	if len(data) < 38 {
 		return nil
+	}
+
+	mType := (messageType)(data[1])
+
+	id, err := uuid.FromString(string(data[2:38]))
+	if err != nil {
+		return nil
+	}
+
+	return &messageEdit{
+		mType: mType,
+		id:    id,
+	}
+}
+
+type Pull struct {
+	Page     int `json:"page"`
+	PageSize int `json:"page_size"`
+}
+
+func (p *Pull) bytes() []byte {
+	chunk, _ := sonic.Marshal(p)
+	return chunk
+}
+
+func ParseHistoryPullInfo(data []byte) *Pull {
+	var pull Pull
+	sonic.Unmarshal(data, &pull)
+
+	return &pull
+}
+
+func ParseResponseMessageEdit2(data []byte) (*messageEdit, error) {
+	msg := NewMessage(data)
+	if msg == nil {
+		return nil, nil
+	}
+
+	r := proxy.ResponseEditData{}
+	content := data[38:]
+	err := json.Unmarshal(content, &r)
+	if err != nil {
+		log.Errorf("unmarshal request edit fail %v", err)
+		return nil, err
+	}
+
+	msg.response = &proxy.Response{
+		StatusCode: r.StatusCode,
+		Body:       auxlib.S2B(r.Body),
+		Header:     r.Header,
+	}
+
+	return msg, nil
+
+}
+
+func ParseRequestMessageEdit2(data []byte) (*messageEdit, error) {
+	msg := NewMessage(data)
+	if msg == nil {
+		return nil, nil
+	}
+
+	r := proxy.RequestEditData{}
+	content := data[38:]
+	err := json.Unmarshal(content, &r)
+	if err != nil {
+		log.Errorf("unmarshal request edit fail %v", err)
+		return nil, err
+	}
+
+	url, err := url.Parse(r.RawURL)
+	if err != nil {
+		log.Errorf("unmarshal request edit url fail %v", err)
+		return nil, err
+	}
+	msg.request = &proxy.Request{
+		Method: r.Method,
+		Proto:  r.Proto,
+		URL:    url,
+		Body:   auxlib.S2B(r.Body),
+		Header: r.Header,
+	}
+
+	return msg, nil
+}
+
+func parseMessage(data []byte) (message, error) {
+	if len(data) < 2 {
+		return nil, TooShortE
 	}
 
 	if data[0] != messageVersion {
-		return nil
+		return nil, VersionE
 	}
 
 	if !validMessageType(data[1]) {
-		return nil
+		return nil, InvalidTypeE
 	}
 
 	mType := (messageType)(data[1])
@@ -311,9 +424,20 @@ func parseMessage(data []byte) message {
 	case messageTypeChangeBreakPointRules:
 		return parseMessageMeta(data)
 	case messageTypeInterceptor:
-		return &Interceptor{enable: data[2]}
+		return &Interceptor{enable: data[2]}, nil
+
+	case messageTypeChangeRequestV2:
+		return ParseRequestMessageEdit2(data)
+	case messageTypeChangeResponseV2:
+		return ParseResponseMessageEdit2(data)
+	case MessageTypeChangeHistoryRules:
+		return parseMessageMeta(data)
+
+	case messageTypePull:
+		return ParseHistoryPullInfo(data), nil
+
 	default:
 		log.Warnf("invalid message type %v", mType)
-		return nil
+		return nil, MessageE
 	}
 }

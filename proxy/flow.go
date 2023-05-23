@@ -17,8 +17,21 @@ type Request struct {
 	Proto  string
 	Header http.Header
 	Body   []byte
+	raw    *http.Request
+}
 
-	raw *http.Request
+type ResponseEditData struct {
+	StatusCode int         `json:"status_code"`
+	Header     http.Header `json:"header"`
+	Body       string      `json:"body"`
+}
+
+type RequestEditData struct {
+	Method string      `json:"method"`
+	Proto  string      `json:"proto"`
+	Header http.Header `json:"header"`
+	Body   string      `json:"body"`
+	RawURL string      `json:"rawURL"`
 }
 
 func newRequest(req *http.Request) *Request {

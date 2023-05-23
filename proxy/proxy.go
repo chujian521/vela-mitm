@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -17,6 +18,7 @@ type Options struct {
 	StreamLargeBodies int64 // 当请求或响应体大于此字节时，转为 stream 模式
 	SslInsecure       bool
 	CaRootPath        string
+	Mode              string
 	Upstream          func(r *http.Request, p *Proxy) string
 }
 
@@ -63,6 +65,14 @@ func NewProxy(opts *Options) (*Proxy, error) {
 	return proxy, nil
 }
 
+func (proxy *Proxy) MustCloseConnection() bool {
+	if proxy.Opts.Mode == "nginx" {
+		return true
+	}
+
+	return false
+}
+
 func (proxy *Proxy) AddAddon(addon Addon) {
 	proxy.Addons = append(proxy.Addons, addon)
 }
@@ -100,13 +110,22 @@ func (proxy *Proxy) Shutdown(ctx context.Context) error {
 }
 
 func (proxy *Proxy) direct(req *http.Request) {
-	if req.URL.IsAbs() || req.URL.Host == "" {
+	if !req.URL.IsAbs() {
 		req.URL.Scheme = "http"
+	}
+	if req.URL.Host == "" {
 		req.URL.Host = req.Host
 	}
 }
 
+func getCurrentGoroutineStack() string {
+	var buf [4096]byte
+	n := runtime.Stack(buf[:], false)
+	return string(buf[:n])
+}
+
 func (proxy *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+
 	if req.Method == "CONNECT" {
 		proxy.handleConnect(res, req)
 		return
@@ -118,15 +137,6 @@ func (proxy *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		"method": req.Method,
 	})
 
-	//if !req.URL.IsAbs() || req.URL.Host == "" {
-	//	res.WriteHeader(400)
-	//	_, err := io.WriteString(res, "此为代理服务器，不能直接发起请求")
-	//	if err != nil {
-	//		log.Error(err)
-	//	}
-	//	return
-	//}
-
 	proxy.direct(req)
 
 	reply := func(response *Response, body io.Reader) {
@@ -137,7 +147,7 @@ func (proxy *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 				}
 			}
 		}
-		if response.close {
+		if response.close || proxy.MustCloseConnection() {
 			res.Header().Add("Connection", "close")
 		}
 		res.WriteHeader(response.StatusCode)
@@ -165,7 +175,7 @@ func (proxy *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	// when addons panic
 	defer func() {
 		if err := recover(); err != nil {
-			log.Warnf("Recovered: %v\n", err)
+			log.Warnf("Recovered: %v\n %s", err, getCurrentGoroutineStack())
 		}
 	}()
 
@@ -304,6 +314,7 @@ func (proxy *Proxy) handleConnect(res http.ResponseWriter, req *http.Request) {
 
 	var conn net.Conn
 	var err error
+
 	if proxy.shouldIntercept == nil || proxy.shouldIntercept(req.Host) {
 		log.Debugf("begin intercept %v", req.Host)
 		conn, err = proxy.interceptor.dial(req)

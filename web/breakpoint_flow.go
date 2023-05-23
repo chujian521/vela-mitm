@@ -7,6 +7,7 @@ import (
 	"github.com/vela-ssoc/vela-kit/lua"
 	"github.com/vela-ssoc/vela-mitm/proxy"
 	"net/http/httputil"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -82,6 +83,28 @@ func (fl *flowL) containL(L *lua.LState) int {
 
 }
 
+func (fl *flowL) Ext() string {
+	ext := filepath.Ext(fl.flow.Request.URL.Path)
+	ext = strings.TrimPrefix(ext, ".")
+	return ext
+}
+
+func (fl *flowL) ResponseL(key string) lua.LValue {
+	switch key {
+	case "body":
+		return lua.B2L(fl.flow.Response.Body)
+	case "length":
+		return lua.LInt(len(fl.flow.Response.Body))
+	case "type":
+		return lua.S2L(fl.flow.Response.Header.Get("Content-Type"))
+	case "encoding":
+		return lua.S2L(fl.flow.Response.Header.Get("Content-Encoding"))
+
+	default:
+		return lua.S2L(fl.flow.Response.Header.Get(key))
+	}
+}
+
 func (fl *flowL) Index(L *lua.LState, key string) lua.LValue {
 	switch key {
 	case "wait":
@@ -103,16 +126,23 @@ func (fl *flowL) Index(L *lua.LState, key string) lua.LValue {
 		return lua.S2L(fl.flow.Request.Header.Get("user-agent"))
 	case "body":
 		return lua.B2L(fl.flow.Request.Body)
+	case "ext":
+		return lua.S2L(fl.Ext())
 	}
 
 	if strings.HasPrefix(key, "h_") {
-		return fl.headerL(key[3:])
+		return fl.headerL(key[2:])
 	}
 
 	if strings.HasPrefix(key, "a_") {
-		return fl.argL(key[3:])
+		return fl.argL(key[2:])
 	}
-	return nil
+
+	if strings.HasPrefix(key, "r_") {
+		return fl.ResponseL(key[2:])
+	}
+
+	return lua.LSNull
 }
 
 type elementL struct {

@@ -1,0 +1,15 @@
+addr: 0.0.0.0
+port: 9080
+large: 5242880
+name: 110011
+pass: 630cxabx3d04
+
+origin:
+  - https://rock-u.eastmoney.com
+  - http://rock-u.eastmoney.com
+  - http://rock.eastmoney.com
+  - https://rock.eastmoney.com
+  - https://rock-u-t.eastmoney.com
+  - http://rock-u-t.eastmoney.com
+
+mode: nginx
