@@ -57,6 +57,7 @@ func (web *WebAddon) Router() *http.ServeMux {
 	serverMux.HandleFunc("/mitm/"+web.config.Name+"/flow/pull", web.HandleFunc(web.MitmFlowPull))
 	serverMux.HandleFunc("/mitm/"+web.config.Name+"/history/clear", web.HandleFunc(web.MitmHistoryClear))
 	serverMux.HandleFunc("/mitm/"+web.config.Name+"/proxy/repeat", web.HandleFunc(web.MitmProxyRequest))
+	serverMux.HandleFunc("/mitm/"+web.config.Name+"/proxy/intruder", web.HandleFunc(web.MitmProxyIntruder))
 	serverMux.HandleFunc("/mitm/"+web.config.Name+"/dummy/cert", web.HandleFunc(web.MitmDummyCert))
 
 	fsys, err := fs.Sub(assets, "client/build")

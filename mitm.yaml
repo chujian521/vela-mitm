@@ -11,5 +11,6 @@ origin:
   - https://rock.eastmoney.com
   - https://rock-u-t.eastmoney.com
   - http://rock-u-t.eastmoney.com
+  - http://172.31.61.189:5173
 
 mode: nginx
